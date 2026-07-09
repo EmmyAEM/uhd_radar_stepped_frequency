@@ -7,10 +7,11 @@ import subprocess
 import signal
 import threading
 import queue
-from ruamel.yaml import YAML
+from ruamel.yaml import YAML 
+
 
 sys.path.append("preprocessing")
-from generate_chirp import generate_from_yaml_filename
+from generate_chirp import generate_from_yaml_filename 
 sys.path.append("postprocessing")
 from save_data import save_data
 
@@ -19,8 +20,8 @@ Provides a simple interface to build, run, and manage data outputs from the SDR 
 
 Should generally be used like this:
 
-runner = RadarProcessRunner(yaml_filename)
-runner.setup() # Build the binary and get everything ready
+runner = RadarProcessRunner(yaml_filename) 
+runner.setup() 
 runner.run() # Run the radar program
 runner.wait() # Wait for it to finish (if `num_pulses` == -1, then you need to call runner.stop() before this will return)
 runner.stop() # Wrap everything up and save data -- you need to call this even if the radar program finishes on its own
