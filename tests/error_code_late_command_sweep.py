@@ -11,10 +11,17 @@ import numpy as np
 import re
 import pickle
 
-sys.path.append("preprocessing")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+sys.path.append(os.path.join(REPO_ROOT, "preprocessing"))
+sys.path.append(os.path.join(REPO_ROOT, "postprocessing"))
+sys.path.append(os.path.join(REPO_ROOT, "config"))
+
 from generate_chirp import generate_from_yaml_filename
-sys.path.append("postprocessing")
 from save_data import save_data
+
 
 def run_and_fail_on_nonzero(cmd):
     retval = os.system(cmd)
@@ -87,12 +94,14 @@ if __name__ == "__main__":
 
     # Check if a YAML file was provided as a command line argument
     parser = argparse.ArgumentParser()
-    parser.add_argument("yaml_file", nargs='?', default='config/default.yaml',
+    parser.add_argument("yaml_file", nargs='?', default=os.path.join(REPO_ROOT, 'config', 'default.yaml'),
             help='Path to YAML configuration file')
     parser.add_argument("--half_duplex", action='store_true',
                         help='Calculate duty cycle for a half duplex transport layer. By default, assumes full duplex.')
     args = parser.parse_args()
     yaml_filename = args.yaml_file
+    if not os.path.isabs(yaml_filename):
+        yaml_filename = os.path.join(REPO_ROOT, yaml_filename)
 
     yaml = YAML(typ='safe')
     with open(yaml_filename) as stream:

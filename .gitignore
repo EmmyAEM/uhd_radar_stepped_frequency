@@ -4,6 +4,10 @@ sdr/build/
 .vscode/**/*
 data/**/*
 !data/README.md
+data_*/
+pulse_length_data/
+gpspipe_stdout.log
+track.gpx
 archive/
 .idea/*
 .DS_Store

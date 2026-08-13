@@ -1,5 +1,4 @@
 #include "sdr.hpp"
-#include <algorithm>
 
 /**
 * @brief Constructs a new Sdr object
@@ -52,28 +51,15 @@ void Sdr::loadConfigFromYaml(const string& kYamlFile) {
 
   // RF
   rf0 = config["RF0"];
-
-  // RF1 only applies to two-channel (dual daughterboard) setups. On
-  // single-channel boards like the B205mini it is not read/required, since
-  // config files for those boards may omit it entirely.
-  size_t num_tx_channels = std::count(tx_channels.begin(), tx_channels.end(), ',') + 1;
-  YAML::Node rate_source = rf0;
-  if (num_tx_channels >= 2) {
-    rf1 = config["RF1"];
-    if (!rf1.IsDefined()) {
-      throw std::runtime_error("RF1 configuration section is required when tx_channels/rx_channels specify more than one channel.");
-    }
-    rate_source = rf1;
-  }
-
-  rx_rate = rate_source["rx_rate"].as<double>();
-  tx_rate = rate_source["tx_rate"].as<double>();
-  freq = rate_source["freq"].as<double>();
-  rx_gain = rate_source["rx_gain"].as<double>();
-  tx_gain = rate_source["tx_gain"].as<double>();
-  bw = rate_source["bw"].as<double>();
-  tx_ant = rate_source["tx_ant"].as<string>();
-  rx_ant = rate_source["rx_ant"].as<string>();
+  rf1 = config["RF1"];
+  rx_rate = rf1["rx_rate"].as<double>();
+  tx_rate = rf1["tx_rate"].as<double>();
+  freq = rf1["freq"].as<double>();
+  rx_gain = rf1["rx_gain"].as<double>();
+  tx_gain = rf1["tx_gain"].as<double>();
+  bw = rf1["bw"].as<double>();
+  tx_ant = rf1["tx_ant"].as<string>();
+  rx_ant = rf1["rx_ant"].as<string>();
 
   transmit = rf0["transmit"].as<bool>(true); // True if transmission enabled
 
@@ -304,32 +290,6 @@ void Sdr::setRFParams(){
 
   // allow for some setup time
   this_thread::sleep_for(chrono::seconds(1));
-}
-
-/*** @brief Retunes the RF center frequency on an already-running USRP
- *
- * Unlike setRFParams() (used once during initial setupUsrp()), this skips
- * the extra 1-second post-setup sleep -- that's meant for first-time bring
- * up, not per-retune use. The only real cost here is the ~110ms LO-lock
- * sleep inside set_rf_params_single()/set_rf_params_multi(). Safe to call
- * between acquisition steps once any in-flight TX/RX commands have been
- * joined (tx_stream/rx_stream themselves don't need to be recreated --
- * they're tied to cpu_format/otw_format/channel count, not frequency).
- */
-void Sdr::retuneFreq(double new_freq) {
-  rf0["freq"] = new_freq;
-  freq = new_freq;
-
-  if (tx_channel_nums.size() == 1) {
-    set_rf_params_single(usrp, rf0, rx_channel_nums, tx_channel_nums);
-  } else if (tx_channel_nums.size() == 2) {
-    if (!transmit) {
-      throw std::runtime_error("Non-transmit mode not supported by set_rf_params_multi");
-    }
-    set_rf_params_multi(usrp, rf0, rf1, rx_channel_nums, tx_channel_nums);
-  } else {
-    throw std::runtime_error("Number of channels requested not supported");
-  }
 }
 
 /*** @brief Checks the reference and local oscillator (LO) lock status

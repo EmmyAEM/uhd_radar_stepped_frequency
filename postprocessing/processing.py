@@ -254,13 +254,24 @@ def findEcho (correl_sig, sample_rate, dir_peak, echo_start, sig_speed, describe
     "Find strongest echo in a correlated signal starting 'echo_start' samples past the direct path peak."
     if (describe): print("--- Searching for echo peak based on sample ---")
     if (describe): print("\tStarting search for echo peak at sample %d." % (dir_peak + echo_start))
-    relevant_ech_s = correl_sig[(dir_peak + echo_start):]         
+
+    if len(correl_sig) <= dir_peak + echo_start:
+        if (describe):
+            print("\tNo samples remain after the direct path peak; returning default values.")
+        return [dir_peak, 0.0]
+
+    relevant_ech_s = correl_sig[(dir_peak + echo_start):]
+    if len(relevant_ech_s) == 0:
+        if (describe):
+            print("\tNo samples remain after the direct path peak; returning default values.")
+        return [dir_peak, 0.0]
+
     echo_peak = np.argmax(relevant_ech_s) + dir_peak + echo_start
     if (describe): print("\tThe strongest echo peak was found at sample %d with value %f." % (echo_peak, correl_sig[echo_peak]))
-    
+
     # Now calculate echo distance (assuming direct path occurs at time 0)
     echo_dist = ((echo_peak - dir_peak) / sample_rate) * sig_speed
-    if (describe): print("\tThe signal echoed off a surface %f meters away. \n" % (echo_dist / 2))   
+    if (describe): print("\tThe signal echoed off a surface %f meters away. \n" % (echo_dist / 2))
     return [echo_peak, echo_dist]
 
 

@@ -1,7 +1,6 @@
 import time
 import argparse
 import os
-import re
 import sys
 import shutil
 import subprocess
@@ -13,7 +12,7 @@ from ruamel.yaml import YAML
 sys.path.append("preprocessing")
 from generate_chirp import generate_from_yaml_filename
 sys.path.append("postprocessing")
-from save_data import save_data, save_stepped_data
+from save_data import save_data
 
 """
 Provides a simple interface to build, run, and manage data outputs from the SDR code
@@ -46,17 +45,8 @@ class RadarProcessRunner():
         self.file_queue_size = 1
         self.output_file = None
         self.output_file_path = None
-
-        # Populated from "[STEP BEGIN]"/"[STEP DONE]" markers in the radar's
-        # stdout (see sdr/main.cpp) -- each entry is
-        # (step_index, freq_hz, data_filename, log_lines) for one RF sub-band
-        # of an in-process stepped-frequency acquisition. A plain (non-
-        # stepped) run still produces exactly one entry here (main.cpp always
-        # runs its per-step loop, even for a single step), which stop()
-        # ignores in favor of the normal single-file save path -- only a
-        # genuine multi-step run (len > 1) uses these.
-        self.step_results = []
-        self._current_step_lines = None
+        self.gpspipe_process = None
+        self.gpxlogger_process = None
 
     """
     Manage the stdout of the radar program, including logging it to a file and optionally sending it for additional processing
@@ -65,8 +55,7 @@ class RadarProcessRunner():
         for line in iter(out.readline, ''):
             # Save output to specified file with timestamp
             t = time.time()
-            timestamped_line = f"[{t:0.3f}] \t{line}"
-            file_out.write(timestamped_line)
+            file_out.write(f"[{t:0.3f}] \t{line}")
 
             # If provided, pass output to external function for processing
             if self.log_processing_function is not None:
@@ -74,28 +63,7 @@ class RadarProcessRunner():
 
             # If specified, also print to stdout
             if also_print:
-                print(timestamped_line, end="")
-
-            # Buffer lines for the current stepped-acquisition step (if any),
-            # so each step's saved log only contains that step's own lines --
-            # this is what lets postprocessing/processing.py's existing
-            # "find the first [START] line" logic keep working unmodified
-            # per step, with no per-line disambiguation needed.
-            if line.startswith("[STEP BEGIN]"):
-                self._current_step_lines = [timestamped_line]
-            elif self._current_step_lines is not None:
-                self._current_step_lines.append(timestamped_line)
-
-            if line.startswith("[STEP DONE]"):
-                match = re.match(r"\[STEP DONE\] index=(\d+) freq=([\d.]+) file=(.+)", line.strip())
-                if match and self._current_step_lines is not None:
-                    index = int(match.group(1))
-                    freq = float(match.group(2))
-                    filename = match.group(3)
-                    if filename.startswith("../../"): # Automatically added to escape cwd of binary
-                        filename = filename[6:] # Strip it out
-                    self.step_results.append((index, freq, filename, self._current_step_lines))
-                self._current_step_lines = None
+                print(f"[{t:0.3f}] \t{line}", end="")
 
             # Enqueue for saving somewhere else
             if line.startswith("[CLOSE FILE]"):
@@ -146,13 +114,27 @@ class RadarProcessRunner():
                 exit(1)
 
         os.chdir("sdr/build")
-        # Tests fetch googletest over the network; skip them here since running
-        # the radar doesn't need them, and field deployment machines may be offline.
-        run_and_fail_on_nonzero("cmake -DBUILD_TESTS=OFF ..")
+        run_and_fail_on_nonzero("cmake ..")
         run_and_fail_on_nonzero("make")
         os.chdir("../..")
 
         self.setup_complete = True
+
+    def _start_optional_process(self, executable, args, label):
+        resolved_executable = shutil.which(executable)
+        if resolved_executable is None or not os.path.exists(resolved_executable):
+            path_value = os.environ.get("PATH", "")
+            package_hint = {
+                "gpspipe": "gpsd or gpsd-clients",
+                "gpxlogger": "gpsd or gpsd-clients",
+            }.get(executable, "the corresponding package")
+            print(
+                f"{label} not found; checked PATH={path_value}. "
+                f"Install {package_hint} to enable {label} logging."
+            )
+            return None
+
+        return subprocess.Popen([resolved_executable] + args)
 
     """
     Start the radar program
@@ -161,8 +143,8 @@ class RadarProcessRunner():
         if not self.setup_complete:
             raise Exception("Must call setup() before calling run(). If setup() does not complete successfully, you cannot call run().")
         
-        self.gpspipe_process = subprocess.Popen(["/usr/bin/gpspipe", "--json", "-uu", "--output", "gpspipe_stdout.log"])
-        self.gpxlogger_process = subprocess.Popen(["/usr/bin/gpxlogger", "--reconnect", "-m2", "-f", "track.gpx", "-e", "sockets"])
+        self.gpspipe_process = self._start_optional_process("gpspipe", ["--json", "-uu", "--output", "gpspipe_stdout.log"], "gpspipe")
+        self.gpxlogger_process = self._start_optional_process("gpxlogger", ["--reconnect", "-m2", "-f", "track.gpx", "-e", "sockets"], "gpxlogger")
         time.sleep(5)
         self.uhd_process = subprocess.Popen(["./radar", self.yaml_filename], stdout=subprocess.PIPE, bufsize=1, close_fds=True, text=True, cwd="sdr/build")
         self.uhd_output_reader_thread = threading.Thread(target=self.process_usrp_output, args=(self.uhd_process.stdout, open('uhd_stdout.log', 'w'), self.output_to_stdout))
@@ -202,8 +184,15 @@ class RadarProcessRunner():
             was_force_killed = True
         self.is_running = False
 
-        self.gpspipe_process.kill()
-        self.gpxlogger_process.kill()
+        for process in (self.gpspipe_process, self.gpxlogger_process):
+            if process is None:
+                continue
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
         self.uhd_output_reader_thread.join()
 
@@ -216,20 +205,11 @@ class RadarProcessRunner():
 
         # Save output
         print("Copying data files...")
-        if len(self.step_results) > 1:
-            # Genuine multi-step (stepped-frequency) acquisition -- each
-            # step's data is a different RF sub-band and must be saved as
-            # its own file set, not merged like save_from_queue() does.
-            file_prefix = save_stepped_data(self.yaml_filename, self.step_results,
-                                    extra_files={"gpspipe_stdout.log": "gpspipe_stdout.log",
-                                                 "track.gpx": "track.gpx"
-                                                 })
-        else:
-            file_prefix = save_data(self.yaml_filename, alternative_rx_samps_loc=alternative_rx_samps_loc, num_files=self.file_queue_size,
-                                    extra_files={"uhd_stdout.log": "uhd_stdout.log",
-                                                 "gpspipe_stdout.log": "gpspipe_stdout.log",
-                                                 "track.gpx": "track.gpx"
-                                                 })
+        file_prefix = save_data(self.yaml_filename, alternative_rx_samps_loc=alternative_rx_samps_loc, num_files=self.file_queue_size,
+                                extra_files={"uhd_stdout.log": "uhd_stdout.log",
+                                             "gpspipe_stdout.log": "gpspipe_stdout.log",
+                                             "track.gpx": "track.gpx"
+                                             })
         print("Finished copying data.")
 
         self.output_file = None
@@ -251,55 +231,25 @@ class RadarProcessRunner():
         self.output_file.close()
 
 
-"""
-Runs a stepped-frequency acquisition. The radar binary itself now retunes
-between RF sub-bands internally, within a single continuous process (see the
-per-step loop in sdr/main.cpp -- RF0.freq is the LOW EDGE of the full span,
-GENERATE.total_bandwidth/chirp_bandwidth determine the step count, same as
-before), so this just runs it once instead of spawning one process per step.
-"""
-def run_stepped_acquisition(yaml_filename):
-    runner = RadarProcessRunner(yaml_filename)
-
-    def sigint_handler(signum, frame):
-        runner.stop() # On Ctrl-C, attempt to stop the active radar process
-    signal.signal(signal.SIGINT, sigint_handler)
-
-    runner.setup()
-    runner.run()
-    runner.wait()
-    runner.stop()
-
-    print("--- Stepped acquisition complete ---")
-    for (index, freq, filename, _) in runner.step_results:
-        print(f"\tStep {index}: {freq/1e6:.2f} MHz -> {filename}")
-
-
 if __name__ == "__main__":
 
     # Check if a YAML file was provided as a command line argument
     parser = argparse.ArgumentParser()
     parser.add_argument("yaml_file", nargs='?', default='config/default.yaml',
             help='Path to YAML configuration file')
-    parser.add_argument("--stepped", action="store_true",
-            help='Run a stepped-frequency acquisition, retuning RF0.freq across '
-                 'GENERATE.total_bandwidth / GENERATE.chirp_bandwidth subchirp steps')
     args = parser.parse_args()
     yaml_filename = args.yaml_file
 
     # Build and run UHD radar code
 
-    if args.stepped:
-        run_stepped_acquisition(yaml_filename)
-    else:
-        runner = RadarProcessRunner(yaml_filename)
+    runner = RadarProcessRunner(yaml_filename)
 
-        def sigint_handler(signum, frame):
-            runner.stop() # On Ctrl-C, attempt to stop radar process
+    def sigint_handler(signum, frame):
+        runner.stop() # On Ctrl-C, attempt to stop radar process
 
-        runner.setup()
-        runner.run()
-        signal.signal(signal.SIGINT, sigint_handler)
-        runner.wait()
-        runner.stop()
+    runner.setup()
+    runner.run()
+    signal.signal(signal.SIGINT, sigint_handler)
+    runner.wait()
+    runner.stop()
 

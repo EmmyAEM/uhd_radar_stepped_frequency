@@ -11,6 +11,7 @@ class Sdr {
 
     void createUsrp();
     void setupUsrp();
+    void retuneFreq(double new_freq);
 
     // DEVICE
     string getDeviceArgs() const;
