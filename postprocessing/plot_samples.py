@@ -7,6 +7,8 @@ import scipy.signal as sp
 import processing as pr
 import matplotlib.pyplot as plt
 from ruamel.yaml import YAML as ym
+import os
+
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -44,6 +46,7 @@ def build_plot_window(corr_sig, dir_peak, sample_rate, num_samps=2000, peak_offs
 parser = argparse.ArgumentParser()
 parser.add_argument("yaml_file", nargs='?', default='config/default.yaml',
         help='Path to YAML configuration file')
+
 args = parser.parse_args()
 
 yaml_path = resolve_path(args.yaml_file)
@@ -67,9 +70,8 @@ with open(yaml_path) as stream:
        direct_start = 0
        echo_start = 1
        sig_speed = 3e8
-   
-print("--- Loaded constants from config.yaml ---")
 
+print("--- Loaded constants from config.yaml ---")
 # Read and plot RX/TX
 for path, label in [(rx_samps, "RX samples"), (orig_ch, "transmitted chirp")]:
     if not os.path.exists(path):

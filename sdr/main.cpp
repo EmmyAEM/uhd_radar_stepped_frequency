@@ -13,6 +13,7 @@ void sig_int_handler(int) {
 
 // FILENAMES
 string chirp_loc;
+string output_dir;
 string save_loc;
 string gps_save_loc;
 
@@ -187,7 +188,9 @@ void wrapUp(ofstream& outfile, string& current_filename, boost::thread_group& tr
   cout << "[RX] transmit_thread.join_all() complete." << endl << endl;
 }
 
-// Send raw UBX message over Boost Asio serial port
+// TODO: This needs to be commented out otherwise the chirp to the spec analyzer won't transmit 
+// because it can't find the data/rx_samps.bin
+ // Send raw UBX message over Boost Asio serial port
 /**
  * @brief Sends message to GPS module over serial port
  * 
@@ -269,7 +272,8 @@ void configureNMEAMessages(boost::asio::serial_port& serial, uint8_t ggaRate) {
 
         sendUBX(serial, msg);
     }
-}
+} 
+
 
 /**
  * @brief Inserts a "_step<i>_<freq>MHz" suffix before a file path's extension.
@@ -318,9 +322,14 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
 
   YAML::Node files = config["FILES"];
   chirp_loc = files["chirp_loc"].as<string>();
+  output_dir = files["output_dir"].as<string>();
   save_loc = files["save_loc"].as<string>();
   gps_save_loc = files["gps_loc"].as<string>();
   chirp.setMaxChirpsPerFile(files["max_chirps_per_file"].as<int>());
+
+  //Merge save_loc and gps_save_loc with output_dir
+  save_loc = std::filesystem::path(output_dir).string() + "/" + save_loc;
+  gps_save_loc = std::filesystem::path(output_dir).string() + "/" + gps_save_loc;
 
   // Calculated parameters
 
@@ -383,7 +392,6 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
 
   /*** FILE WRITE SETUP (shared across all steps) ***/
   boost::asio::io_service ioservice;
-
   if (save_loc[0] != '/') {
     save_loc = "../../" + save_loc;
   }
@@ -426,6 +434,8 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
   io_service io;
   serial_port serial(io);
   ofstream gps_output;
+  std::string line;
+  char c;
 
   // GPS serial hardware is only needed when disciplining the clock off of a
   // GPSDO. Skip opening /dev/ttyACM0 entirely otherwise, since it will throw
@@ -452,11 +462,9 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
     cout << "INFO: clk_ref is not 'gpsdo' -- skipping GPS serial port setup." << endl;
   }
 
-  std::string line;
-  char c;
-
   if (chirp.getNumPulses() < 0) {
     cout << "num_pulses is < 0. Will continue to send chirps until stopped with Ctrl-C." << endl;
+
   }
 
   /*** STEPPED ACQUISITION LOOP -- one iteration per RF sub-band ***/
@@ -662,7 +670,7 @@ void transmit_worker(tx_streamer::sptr& tx_stream, rx_streamer::sptr& rx_stream,
   set_thread_priority_safe(1.0, true);
 
   // open file to stream from
-  ifstream infile("../../" + chirp_loc, ifstream::binary);
+  ifstream infile("../../" + output_dir + "/" + chirp_loc, ifstream::binary);
 
   if (!infile.is_open())
   {

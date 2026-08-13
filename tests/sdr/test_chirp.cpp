@@ -13,7 +13,7 @@ using namespace std;
 TEST(assignVarFromYaml, loadsDefault){
     const string kConfigFile = string(CONFIG_DIR) + "/default.yaml";
     Chirp chirp(kConfigFile);
-
+    
     EXPECT_EQ(chirp.getTimeOffset(), 1);
     EXPECT_EQ(chirp.getTxDuration(), 20e-6);
     EXPECT_EQ(chirp.getRxDuration(), 20e-6);

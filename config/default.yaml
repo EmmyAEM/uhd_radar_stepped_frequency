@@ -19,7 +19,7 @@ GENERATE:
     chirp_length: &chirp_len 1       # [s] Chirp length without zero padding
     pulse_length: &pulse_len 1      # [s] Total pulse length (chirp +
                                          #   symmetric zero padding)    CHANGED
-    out_file: &ch_sent "data/chirp.bin"  # The name of the output binary file
+    out_file: &ch_sent "chirp.bin"  # The name of the output binary file
                                          #   containing the pulse samples
     show_plot: False                     # Display a time-domain plot of the
                                          #   generated chirp
@@ -118,9 +118,10 @@ CHIRP:
 ### DURING-RECORDING FILE LOCATIONS
 FILES:
     chirp_loc: *ch_sent                  # Chirp file to transmit
-    save_loc: &save_loc "data/rx_samps.bin"   # (Temporary) location to write
+    output_dir: "data"                   # Directory to save output files to
+    save_loc: &save_loc "rx_samps.bin"   # (Temporary) location to write
                                               #   received samples to
-    gps_loc: &gps_save_loc "data/gps_log.txt" # (Temporary) location to save GPS
+    gps_loc: &gps_save_loc "gps_log.txt" # (Temporary) location to save GPS
                                               #   data (only works if gpsdo is
                                               #   selected as the clock source)
     max_chirps_per_file: -1              # Maximum number of RX from a chirp to
@@ -140,12 +141,32 @@ RUN_MANAGER: # These settings are only used by run.py -- not read by main.cpp
     save_gps: False                      # Set to true if using gps and wanting
                                          #   to save gps location data, set to
                                          #   false otherwise
-
+                                         
+# -------------------------- Plot Samples --------------------------- #
 PLOT:
-    rx_samps: "data/20260720_180329_rx_samps.bin"         # Receive data to use
-    orig_chirp: "data/chirp.bin"           # Chirp associated with receive data
+    rx_samps: *save_loc              # Receive data to use
+    orig_chirp: *ch_sent           # Chirp associated with receive data
     sample_rate: *s_rate
     sig_speed: 1.685e8                 # Speed of signal through medium [m/s]
     direct_start: &dir_start 0    # Start search for direct path @ this sample
     echo_start: 1                  # Start search for echo @ this # of samps. after direct path
 
+ENVIRONMENTAL_FACTORS:  #these are the factors that affect the power equation that is needed in the automatic amplification file in postprocessing
+
+    scattering_max: 1 #assumes max
+
+    scattering_current: 0.5 #user input
+
+    specular_reflection_coeff_max: 1 # assuming s pol, max
+
+    specular_reflection_coeff_current: 0.5 #user input
+
+    antenna_gain: 6 #user input in dB
+
+    tilt_of_plane: 0 #theta, user input
+
+    reference_power: -66 #user input in dBm
+
+    power_loss: 35 #user input in dB
+
+    max_rx_gain: 76 #specific to USRP b205 mini
