@@ -55,14 +55,22 @@ include_directories(
 )
 link_directories(${Boost_LIBRARY_DIRS})
 
-include(FetchContent)
-FetchContent_Declare(
-    googletest
-    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+# Unit tests pull in googletest over the network (see below), which isn't
+# available on offline field deployment machines. Set -DBUILD_TESTS=OFF to
+# skip building/fetching them entirely; the radar executable itself never
+# needs this dependency.
+option(BUILD_TESTS "Build unit tests (requires network access to fetch googletest)" ON)
+
+if(BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+endif()
 
 ### Make the executables #######################################################
 # Radar executable
@@ -71,8 +79,10 @@ add_executable(radar main.cpp rf_settings.cpp rf_settings.hpp utils.cpp utils.hp
 add_executable(pseudorandom_phase_codes_to_file pseudorandom_phase_to_file.cpp pseudorandom_phase.cpp pseudorandom_phase.hpp common.hpp)
 add_executable(gps_test gps_test.cpp)
 
-enable_testing()
-add_subdirectory(${CMAKE_SOURCE_DIR}/../tests ${CMAKE_BINARY_DIR}/tests)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(${CMAKE_SOURCE_DIR}/../tests ${CMAKE_BINARY_DIR}/tests)
+endif()
 
 set(CMAKE_BUILD_TYPE "Release")
 

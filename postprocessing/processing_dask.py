@@ -46,7 +46,7 @@ def process_stdout_log(log):
     return start_timestamp, errors, num_pulses_attempted
 
 
-def save_radar_data_to_zarr(prefix, skip_if_cached=True, zarr_base_location=None, expected_base_name_regex=r'\d{8}_\d{6}', log_required=True, dryrun=False):
+def save_radar_data_to_zarr(prefix, skip_if_cached=True, zarr_base_location=None, expected_base_name_regex=r'\d{8}_\d{6}', log_required=False, dryrun=False):
     """
     Load raw radar data from a given prefix, and save it to a zarr file.
     
@@ -112,22 +112,6 @@ def save_radar_data_to_zarr(prefix, skip_if_cached=True, zarr_base_location=None
     else:
         raise Exception(f"Unrecognized cpu_format '{cpu_format}'. Must be one of 'fc32', 'sc16', or 'sc8'.")
 
-    # Load raw RX samples
-    rx_len_samples = int(config['CHIRP']['rx_duration']
-                         * config['GENERATE']['sample_rate'])
-    rx_sig = da.from_array(
-        np.memmap(rx_samps_file, dtype=output_dtype, mode='r', order='C'), chunks=rx_len_samples*2*100)
-    rx_sig = (rx_sig[::2] + (1j * rx_sig[1::2])).astype(np.complex64) / scale_factor
-    n_rxs = rx_sig.size // rx_len_samples
-    radar_data = da.transpose(da.reshape(
-        rx_sig, (n_rxs, rx_len_samples), merge_chunks=True))
-
-    # Create time axes
-    slow_time = np.linspace(0, config['CHIRP']['pulse_rep_int']
-                            * config['CHIRP'].get('num_presums', 1)*n_rxs, radar_data.shape[1])
-    fast_time = np.linspace(
-        0, config['CHIRP']['rx_duration'], radar_data.shape[0])
-
     # Load raw data from log
     log = None
     if os.path.exists(log_file):
@@ -137,6 +121,44 @@ def save_radar_data_to_zarr(prefix, skip_if_cached=True, zarr_base_location=None
         if log_required:
             raise FileNotFoundError(
                 f"Log file not found: {log_file}. If a log file is not required, set log_required=False")
+
+    # Load raw RX samples
+    #
+    # rx_len_samples (the number of complex samples per pulse) should in principle be
+    # config['CHIRP']['rx_duration'] * config['GENERATE']['sample_rate'], but the acquisition
+    # code computes this same product in C++ as a narrowing double->size_t conversion, which can
+    # truncate differently than Python's int() depending on floating point rounding. When the log
+    # is available, prefer the actual value it reports ("Number of RX samples: N") since that's
+    # the value that was really used to write the file, rather than recomputing it and risking an
+    # off-by-one that breaks the reshape below.
+    rx_len_samples_from_config = int(config['CHIRP']['rx_duration']
+                                     * config['GENERATE']['sample_rate'])
+    rx_len_samples = rx_len_samples_from_config
+    if log is not None:
+        log_match = re.search(r"Number of RX samples:\s*(\d+)", log)
+        if log_match is not None:
+            rx_len_samples = int(log_match.groups()[0])
+            if rx_len_samples != rx_len_samples_from_config:
+                print(f"WARNING: Number of RX samples per pulse computed from config ({rx_len_samples_from_config}) "
+                      f"does not match the value reported in the log ({rx_len_samples}). Using the log value.")
+
+    rx_sig = da.from_array(
+        np.memmap(rx_samps_file, dtype=output_dtype, mode='r', order='C'), chunks=rx_len_samples*2*100)
+    rx_sig = (rx_sig[::2] + (1j * rx_sig[1::2])).astype(np.complex64) / scale_factor
+    n_rxs = rx_sig.size // rx_len_samples
+    if n_rxs * rx_len_samples != rx_sig.size:
+        # The file doesn't hold a whole number of pulses (e.g. acquisition was interrupted
+        # mid-pulse). Drop the trailing partial pulse rather than failing to reshape.
+        print(f"WARNING: {rx_samps_file} contains {rx_sig.size - n_rxs * rx_len_samples} leftover samples "
+              f"that don't form a complete pulse. Dropping them.")
+        rx_sig = rx_sig[:n_rxs * rx_len_samples]
+    radar_data = da.transpose(da.reshape(rx_sig, (n_rxs, rx_len_samples), merge_chunks=True))
+
+    # Create time axes
+    slow_time = np.linspace(0, config['CHIRP']['pulse_rep_int']
+                            * config['CHIRP'].get('num_presums', 1)*n_rxs, radar_data.shape[1])
+    fast_time = np.linspace(
+        0, config['CHIRP']['rx_duration'], radar_data.shape[0])
 
     gpsdlog = None
     if os.path.exists(gpsd_file):

@@ -1,19 +1,19 @@
 import time
 import argparse
 import os
-import re
 import sys
 import shutil
 import subprocess
 import signal
 import threading
 import queue
+import copy
 from ruamel.yaml import YAML
 
 sys.path.append("preprocessing")
 from generate_chirp import generate_from_yaml_filename
 sys.path.append("postprocessing")
-from save_data import save_data, save_stepped_data
+from save_data import save_data
 
 """
 Provides a simple interface to build, run, and manage data outputs from the SDR code
@@ -47,17 +47,6 @@ class RadarProcessRunner():
         self.output_file = None
         self.output_file_path = None
 
-        # Populated from "[STEP BEGIN]"/"[STEP DONE]" markers in the radar's
-        # stdout (see sdr/main.cpp) -- each entry is
-        # (step_index, freq_hz, data_filename, log_lines) for one RF sub-band
-        # of an in-process stepped-frequency acquisition. A plain (non-
-        # stepped) run still produces exactly one entry here (main.cpp always
-        # runs its per-step loop, even for a single step), which stop()
-        # ignores in favor of the normal single-file save path -- only a
-        # genuine multi-step run (len > 1) uses these.
-        self.step_results = []
-        self._current_step_lines = None
-
     """
     Manage the stdout of the radar program, including logging it to a file and optionally sending it for additional processing
     """
@@ -65,8 +54,7 @@ class RadarProcessRunner():
         for line in iter(out.readline, ''):
             # Save output to specified file with timestamp
             t = time.time()
-            timestamped_line = f"[{t:0.3f}] \t{line}"
-            file_out.write(timestamped_line)
+            file_out.write(f"[{t:0.3f}] \t{line}")
 
             # If provided, pass output to external function for processing
             if self.log_processing_function is not None:
@@ -74,28 +62,7 @@ class RadarProcessRunner():
 
             # If specified, also print to stdout
             if also_print:
-                print(timestamped_line, end="")
-
-            # Buffer lines for the current stepped-acquisition step (if any),
-            # so each step's saved log only contains that step's own lines --
-            # this is what lets postprocessing/processing.py's existing
-            # "find the first [START] line" logic keep working unmodified
-            # per step, with no per-line disambiguation needed.
-            if line.startswith("[STEP BEGIN]"):
-                self._current_step_lines = [timestamped_line]
-            elif self._current_step_lines is not None:
-                self._current_step_lines.append(timestamped_line)
-
-            if line.startswith("[STEP DONE]"):
-                match = re.match(r"\[STEP DONE\] index=(\d+) freq=([\d.]+) file=(.+)", line.strip())
-                if match and self._current_step_lines is not None:
-                    index = int(match.group(1))
-                    freq = float(match.group(2))
-                    filename = match.group(3)
-                    if filename.startswith("../../"): # Automatically added to escape cwd of binary
-                        filename = filename[6:] # Strip it out
-                    self.step_results.append((index, freq, filename, self._current_step_lines))
-                self._current_step_lines = None
+                print(f"[{t:0.3f}] \t{line}", end="")
 
             # Enqueue for saving somewhere else
             if line.startswith("[CLOSE FILE]"):
@@ -160,7 +127,7 @@ class RadarProcessRunner():
     def run(self):
         if not self.setup_complete:
             raise Exception("Must call setup() before calling run(). If setup() does not complete successfully, you cannot call run().")
-        
+
         self.gpspipe_process = subprocess.Popen(["/usr/bin/gpspipe", "--json", "-uu", "--output", "gpspipe_stdout.log"])
         self.gpxlogger_process = subprocess.Popen(["/usr/bin/gpxlogger", "--reconnect", "-m2", "-f", "track.gpx", "-e", "sockets"])
         time.sleep(5)
@@ -216,26 +183,17 @@ class RadarProcessRunner():
 
         # Save output
         print("Copying data files...")
-        if len(self.step_results) > 1:
-            # Genuine multi-step (stepped-frequency) acquisition -- each
-            # step's data is a different RF sub-band and must be saved as
-            # its own file set, not merged like save_from_queue() does.
-            file_prefix = save_stepped_data(self.yaml_filename, self.step_results,
-                                    extra_files={"gpspipe_stdout.log": "gpspipe_stdout.log",
-                                                 "track.gpx": "track.gpx"
-                                                 })
-        else:
-            file_prefix = save_data(self.yaml_filename, alternative_rx_samps_loc=alternative_rx_samps_loc, num_files=self.file_queue_size,
-                                    extra_files={"uhd_stdout.log": "uhd_stdout.log",
-                                                 "gpspipe_stdout.log": "gpspipe_stdout.log",
-                                                 "track.gpx": "track.gpx"
-                                                 })
+        file_prefix = save_data(self.yaml_filename, alternative_rx_samps_loc=alternative_rx_samps_loc, num_files=self.file_queue_size,
+                                extra_files={"uhd_stdout.log": "uhd_stdout.log",
+                                             "gpspipe_stdout.log": "gpspipe_stdout.log",
+                                             "track.gpx": "track.gpx"
+                                             })
         print("Finished copying data.")
 
         self.output_file = None
 
         return file_prefix
-    
+
     """
     Copy data from split files into a single data output file
     """
@@ -252,27 +210,84 @@ class RadarProcessRunner():
 
 
 """
-Runs a stepped-frequency acquisition. The radar binary itself now retunes
-between RF sub-bands internally, within a single continuous process (see the
-per-step loop in sdr/main.cpp -- RF0.freq is the LOW EDGE of the full span,
-GENERATE.total_bandwidth/chirp_bandwidth determine the step count, same as
-before), so this just runs it once instead of spawning one process per step.
+Splits a base YAML config into `num_steps` per-step configs, each retuned to a
+different RF0.freq, so that a total synthetic bandwidth wider than the SDR's
+sample rate can be covered by a sequence of narrower subchirp acquisitions.
+
+RF0.freq in the base config is treated as the LOW EDGE of the full span (not
+its center). GENERATE.total_bandwidth must be an integer multiple of
+GENERATE.chirp_bandwidth; if total_bandwidth is absent it defaults to
+chirp_bandwidth (i.e. a single step, identical to today's behavior).
+
+Returns a list of (step_yaml_path, center_freq) tuples, in step order.
+"""
+def generate_stepped_configs(yaml_filename):
+    yaml = YAML()
+    with open(yaml_filename) as stream:
+        base_config = yaml.load(stream)
+
+    chirp_bandwidth = base_config['GENERATE']['chirp_bandwidth']
+    total_bandwidth = base_config['GENERATE'].get('total_bandwidth', chirp_bandwidth)
+    low_edge_freq = base_config['RF0']['freq']
+
+    num_steps = round(total_bandwidth / chirp_bandwidth)
+    if abs(num_steps * chirp_bandwidth - total_bandwidth) > 1.0:
+        raise ValueError(
+            f"GENERATE.total_bandwidth ({total_bandwidth/1e6:.2f} MHz) must be an "
+            f"integer multiple of GENERATE.chirp_bandwidth ({chirp_bandwidth/1e6:.2f} MHz)."
+        )
+
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(yaml_filename)), "_generated_stepped")
+    os.makedirs(out_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(yaml_filename))[0]
+
+    step_configs = []
+    for i in range(num_steps):
+        center_freq = low_edge_freq + chirp_bandwidth * (i + 0.5)
+
+        step_config = copy.deepcopy(base_config)
+        step_config['RF0']['freq'] = center_freq
+
+        final_save_loc = step_config['RUN_MANAGER'].get('final_save_loc')
+        if final_save_loc is not None:
+            root, ext = os.path.splitext(final_save_loc)
+            step_config['RUN_MANAGER']['final_save_loc'] = f"{root}_step{i}{ext}"
+
+        step_yaml_path = os.path.join(out_dir, f"{base_name}_step{i}_{center_freq/1e6:.0f}MHz.yaml")
+        with open(step_yaml_path, 'w') as stream:
+            yaml.dump(step_config, stream)
+
+        step_configs.append((step_yaml_path, center_freq))
+
+    return step_configs
+
+"""
+Runs a full stepped-frequency acquisition: one complete build/generate/run/save
+cycle per subchirp, retuning RF0.freq between steps to tile the total
+synthetic bandwidth requested via GENERATE.total_bandwidth in the YAML config.
 """
 def run_stepped_acquisition(yaml_filename):
-    runner = RadarProcessRunner(yaml_filename)
+    step_configs = generate_stepped_configs(yaml_filename)
 
+    current_runner = None
     def sigint_handler(signum, frame):
-        runner.stop() # On Ctrl-C, attempt to stop the active radar process
+        if current_runner is not None:
+            current_runner.stop() # On Ctrl-C, attempt to stop the active radar process
     signal.signal(signal.SIGINT, sigint_handler)
 
-    runner.setup()
-    runner.run()
-    runner.wait()
-    runner.stop()
+    file_prefixes = []
+    for i, (step_yaml_path, center_freq) in enumerate(step_configs):
+        print(f"--- Step {i+1}/{len(step_configs)}: center freq {center_freq/1e6:.2f} MHz ---")
+
+        current_runner = RadarProcessRunner(step_yaml_path)
+        current_runner.setup()
+        current_runner.run()
+        current_runner.wait()
+        file_prefixes.append(current_runner.stop())
 
     print("--- Stepped acquisition complete ---")
-    for (index, freq, filename, _) in runner.step_results:
-        print(f"\tStep {index}: {freq/1e6:.2f} MHz -> {filename}")
+    for (_, center_freq), prefix in zip(step_configs, file_prefixes):
+        print(f"\t{center_freq/1e6:.2f} MHz -> {prefix}")
 
 
 if __name__ == "__main__":
@@ -302,4 +317,3 @@ if __name__ == "__main__":
         signal.signal(signal.SIGINT, sigint_handler)
         runner.wait()
         runner.stop()
-

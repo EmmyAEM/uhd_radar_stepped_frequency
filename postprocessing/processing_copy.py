@@ -25,89 +25,19 @@ def load_config(prefix, modifications = {}):
 
     return config
 
-def get_start_timestamp(prefix):
-    """
-    Read just the wall-clock Unix timestamp (seconds) at which this run's
-    radar program actually started transmitting/receiving -- the "[START]"
-    (or older "Scheduling chirp 0 RX") line in its saved uhd_stdout.log.
-
-    Unlike load_radar_data(), this only reads the small log file, never the
-    raw sample .bin file (which can be many GB) -- safe to call for every
-    step of a multi-step acquisition up front without loading all their raw
-    data into memory at once (see loopback_testing.py's main_multi()).
-
-    Returns None if the log or that line can't be found.
-    """
-    log_file = prefix + "_uhd_stdout.log"
-    if not os.path.exists(log_file):
-        return None
-    with open(log_file, 'r') as log_f:
-        for line in log_f:
-            if ("[START]" in line) or ("Scheduling chirp 0 RX" in line):
-                match = re.search("(?:\[)([\d]+\.[\d]+)", line)
-                if match:
-                    return float(match.group(1))
-    return None
-
-def stream_average_pulses(prefix, max_pulses=None):
-    """
-    Compute the coherent average of all pulses in a capture, reading and
-    accumulating one pulse at a time directly from disk rather than loading
-    the whole (potentially many-GB) file into memory at once, the way
-    load_radar_data() + stack() does. Averaging is linear, so this produces
-    the same result -- but peak memory is roughly one pulse's size (the
-    running accumulator plus whichever pulse was just read), regardless of
-    how many total pulses the file contains.
-
-    max_pulses: if given, only average the first max_pulses pulses (e.g.
-        for a fast partial preview) instead of every pulse in the file.
-
-    Returns (averaged_pulse, sample_rate, n_pulses_used), where
-    averaged_pulse is a 1D complex array the same length as one pulse.
-    """
-    rx_samps = prefix + "_rx_samps.bin"
-    config = load_config(prefix)
-    rx_len_samples = int(config['CHIRP']['rx_duration'] * config['GENERATE']['sample_rate'])
-    sample_rate = config['GENERATE']['sample_rate']
-
-    bytes_per_pulse = rx_len_samples * 8  # complex64 = 8 bytes/sample
-    n_pulses_available = os.path.getsize(rx_samps) // bytes_per_pulse
-    n_pulses = n_pulses_available if max_pulses is None else min(max_pulses, n_pulses_available)
-
-    accumulator = np.zeros(rx_len_samples, dtype=np.csingle)
-    n_pulses_used = 0
-    with open(rx_samps, 'rb') as f:
-        for _ in range(n_pulses):
-            pulse = np.fromfile(f, dtype=np.csingle, count=rx_len_samples)
-            if len(pulse) < rx_len_samples:
-                # Truncated trailing pulse (e.g. run was interrupted
-                # mid-write) -- stop here rather than accumulating a
-                # partial/misaligned pulse.
-                print(f"WARNING: {rx_samps} has a truncated trailing pulse -- "
-                      f"stopping after {n_pulses_used} complete pulses.")
-                break
-            accumulator += pulse
-            n_pulses_used += 1
-
-    if n_pulses_used == 0:
-        raise ValueError(f"No complete pulses found in {rx_samps}")
-
-    averaged_pulse = accumulator / n_pulses_used
-    return averaged_pulse, sample_rate, n_pulses_used
-
 def load_radar_data(prefix, load_start_seconds=0, max_seconds_to_load=60*100, max_chunk_size_samples=int(2e8), error_behavior=None, debug=True):
     rx_samps = prefix + "_rx_samps.bin"
     log_file = prefix + "_uhd_stdout.log"
-    
+
     config = load_config(prefix)
     rx_len_samples = int(config['CHIRP']['rx_duration'] * config['GENERATE']['sample_rate'])
-    
-    max_file_size_bytes = rx_len_samples*max(1, int(1/config['CHIRP']['pulse_rep_int']))*8*max_seconds_to_load
-    load_start_bytes = rx_len_samples*max(1, int(1/config['CHIRP']['pulse_rep_int']))*8*load_start_seconds
+
+    max_file_size_bytes = rx_len_samples*int(1/config['CHIRP']['pulse_rep_int'])*8*max_seconds_to_load
+    load_start_bytes = rx_len_samples*int(1/config['CHIRP']['pulse_rep_int'])*8*load_start_seconds
 
     file_size_bytes = os.path.getsize(rx_samps) - load_start_bytes
     if file_size_bytes > max_file_size_bytes:
-        print(f"WARNING: File is {file_size_bytes/(2**30):.2f} GB ({file_size_bytes / (rx_len_samples*max(1, int(1/config['CHIRP']['pulse_rep_int']))*2):.2f} seconds). Only loading the first {max_seconds_to_load} seconds.")
+        print(f"WARNING: File is {file_size_bytes/(2**30):.2f} GB ({file_size_bytes / (rx_len_samples*int(1/config['CHIRP']['pulse_rep_int'])*2):.2f} seconds). Only loading the first {max_seconds_to_load} seconds.")
         file_size_bytes = max_file_size_bytes
 
     rx_sig = np.zeros((file_size_bytes//8,), dtype=np.csingle)
@@ -120,15 +50,6 @@ def load_radar_data(prefix, load_start_seconds=0, max_seconds_to_load=60*100, ma
     # Reshape data
 
     n_rxs = len(rx_sig) // rx_len_samples
-    leftover = len(rx_sig) - n_rxs * rx_len_samples
-    if leftover > 0:
-        # A trailing partial pulse means the run was interrupted (Ctrl-C,
-        # force-kill, or an error) mid-write on its last record -- drop the
-        # incomplete tail rather than crashing on reshape().
-        print(f"WARNING: {rx_samps} has {leftover} leftover samples that don't "
-              f"fill a full pulse ({rx_len_samples} samples/pulse) -- the run "
-              f"was likely interrupted mid-write. Dropping the incomplete trailing pulse.")
-        rx_sig = rx_sig[:n_rxs * rx_len_samples]
     rx_sig_reshaped = np.transpose(np.reshape(rx_sig, (n_rxs, rx_len_samples), order='C'))
 
     if debug:
@@ -146,10 +67,10 @@ def load_radar_data(prefix, load_start_seconds=0, max_seconds_to_load=60*100, ma
 
     if os.path.exists(log_file):
         errors = {}
-        
+
         log_f = open(log_file, 'r')
         log = log_f.readlines()
-        
+
         for idx, line in enumerate(log):
             if "Receiver error:" in line:
                 error_code = re.search("(?:Receiver error: )([\w_]+)", line).groups()[0]
@@ -191,13 +112,13 @@ def load_radar_data(prefix, load_start_seconds=0, max_seconds_to_load=60*100, ma
         n_rxs = len(keep_idxs)
 
         slow_time = slow_time[keep_idxs]
-        
+
     if debug:
         print(f"n_rxs: {n_rxs}")
         print(f"rx_sig_reshaped shape: {np.shape(rx_sig_reshaped)}")
         print(f"Extracted start timestamp: {start_timestamp}")
 
-    return slow_time, config['GENERATE']['sample_rate'], rx_sig_reshaped, start_timestamp
+    return slow_time, config['GENERATE']['sample_rate'], rx_sig_reshaped
 
 # This function extracts the complex signal stored in a bin file.
 # The format of the bin file is <1st real><1st imag><2nd real><2nd imag>
@@ -213,12 +134,12 @@ def extractSig (filename, count=-1, offset=0):
 def loadSamplesFromFile(filename, config, reshape=True, max_chunk_size=int(5e8), max_seconds_to_load=60*20, load_start_seconds=0):
 
     rx_len_samples = int(config['CHIRP']['rx_duration'] * config['GENERATE']['sample_rate'])
-    max_file_size_bytes = rx_len_samples*max(1, int(1/config['CHIRP']['pulse_rep_int']))*8*max_seconds_to_load
-    load_start_bytes = rx_len_samples*max(1, int(1/config['CHIRP']['pulse_rep_int']))*8*load_start_seconds
+    max_file_size_bytes = rx_len_samples*int(1/config['CHIRP']['pulse_rep_int'])*8*max_seconds_to_load
+    load_start_bytes = rx_len_samples*int(1/config['CHIRP']['pulse_rep_int'])*8*load_start_seconds
 
     file_size_bytes = os.path.getsize(filename) - load_start_bytes
     if file_size_bytes > max_file_size_bytes:
-        print(f"WARNING: File is {file_size_bytes/(2**30):.2f} GB ({file_size_bytes / (rx_len_samples*max(1, int(1/config['CHIRP']['pulse_rep_int']))*2):.2f} seconds). Only loading the first {max_seconds_to_load} seconds.")
+        print(f"WARNING: File is {file_size_bytes/(2**30):.2f} GB ({file_size_bytes / (rx_len_samples*int(1/config['CHIRP']['pulse_rep_int'])*2):.2f} seconds). Only loading the first {max_seconds_to_load} seconds.")
         file_size_bytes = max_file_size_bytes
 
     rx_sig = np.zeros((file_size_bytes//8,), dtype=np.csingle)
@@ -254,7 +175,7 @@ def pulse_compress(radar_data, chirp, fs, upsampling=1, zero_sample_idx=0):
         radar_data = np.expand_dims(radar_data, axis=1)
 
     xcorr_results = np.zeros((((np.shape(radar_data)[0]*upsampling)-len(corr_sig))+1, np.shape(radar_data)[1]), dtype=np.csingle)
-    
+
     fast_time = np.linspace(0, np.shape(xcorr_results)[0]/(fs*upsampling), np.shape(xcorr_results)[0])
     fast_time = fast_time - fast_time[zero_sample_idx*upsampling]
 
@@ -266,90 +187,6 @@ def pulse_compress(radar_data, chirp, fs, upsampling=1, zero_sample_idx=0):
         xcorr_results[:, res_idx] = scipy.signal.correlate(stacked, corr_sig, mode='valid', method='auto') / np.sum(np.abs(corr_sig)**2)
 
     return fast_time, xcorr_results
-
-def deramp(rx, tx_ref):
-    """
-    Deramp (dechirp) an FMCW/continuous-chirp RX capture against a reference
-    TX chirp waveform, producing a "beat signal" whose frequency encodes
-    delay/range. This is the standard FMCW/ApRES processing technique -- a
-    cheap O(N) elementwise multiply, unlike pulse-compression cross-
-    correlation (see pulse_compress() above), which needs FFTs padded to
-    ~2x the signal length and becomes prohibitively expensive (GB-scale
-    memory) for long continuous chirps rather than short discrete pulses.
-
-    rx and tx_ref must be the same length (same duration/sample rate) --
-    trims to the shorter of the two defensively if they aren't.
-    """
-    n = min(len(rx), len(tx_ref))
-    return rx[:n] * np.conjugate(tx_ref[:n])
-
-def fmcw_range_profile(rx, tx_ref, sample_rate, chirp_bandwidth, chirp_duration,
-                        velocity_factor=2/3, loopback=True, window=None,
-                        range_offset=0.0):
-    """
-    Compute a range profile from one FMCW/deramp chirp capture via a single
-    FFT of the deramped beat signal (see deramp()).
-
-    For this codebase's chirp convention (linear up-chirp, exp(+j*2*pi*...)
-    phase -- see preprocessing/generate_chirp.py), a positive delay tau
-    produces beat frequency f_beat = -alpha*tau, where
-    alpha = chirp_bandwidth/chirp_duration is the chirp rate. Since only
-    non-negative delay is physically meaningful (and any additional sign
-    flip from asymmetric RX/TX DSP mixing can't be verified without a real
-    reference measurement), this folds the spectrum via abs(f_beat) rather
-    than committing to a hard sign -- calibrate against a known reference
-    distance (see the coax_length parameter in loopback_testing.py's
-    plot_fmcw_range()) to confirm/adjust for your specific hardware chain.
-
-    Args:
-        rx: 1D complex RX capture (one chirp).
-        tx_ref: 1D complex reference TX chirp (same waveform as transmitted,
-            e.g. from preprocessing.generate_chirp.generate_chirp()).
-        sample_rate: sampling rate in Hz.
-        chirp_bandwidth: swept bandwidth in Hz (GENERATE.chirp_bandwidth).
-        chirp_duration: chirp sweep duration in seconds (GENERATE.chirp_length).
-        velocity_factor: fraction of light speed in the propagation medium.
-        loopback: True for a one-way path (e.g. TX->cable->RX, no target
-            reflection) -- range = v*delay. False for a two-way reflection
-            (radar bouncing off a target) -- range = v*delay/2.
-        window: optional window function taking a length and returning an
-            array (e.g. np.blackman), applied to the beat signal before the
-            FFT to reduce spectral sidelobes.
-        range_offset: constant distance in meters subtracted from every
-            computed range. Unlike the pulse-compression path
-            (plot_matched()'s zero_sample_idx), this deramp/FFT path has no
-            built-in correction for fixed hardware group delay (cabling,
-            DAC/ADC latency, filters, etc.), so the raw peak generally won't
-            line up with a known reference distance until you supply one.
-            To calibrate: run against a reference of known length (e.g. a
-            loopback coax cable), note how far off the measured peak is from
-            that length, and pass the difference here.
-
-    Returns (ranges, magnitude_db): ranges in meters (sorted ascending, may
-    include small negative values once range_offset is subtracted).
-    """
-    beat = deramp(rx, tx_ref)
-    n = len(beat)
-    if window is not None:
-        beat = beat * window(n)
-
-    spectrum = np.fft.fft(beat)
-    freqs = np.fft.fftfreq(n, d=1/sample_rate)
-
-    chirp_rate = chirp_bandwidth / chirp_duration  # Hz/s
-    c0 = 299792458.0  # speed of light in vacuum (m/s)
-    v = velocity_factor * c0
-
-    delay = np.abs(freqs) / chirp_rate  # seconds
-    ranges = v * delay if loopback else v * delay / 2
-    ranges = ranges - range_offset
-
-    magnitude_db = 20 * np.log10(np.abs(spectrum) + 1e-12)
-
-    # Sort by range for a clean monotonic x-axis (folding +/- frequency can
-    # otherwise interleave bins out of order)
-    order = np.argsort(ranges)
-    return ranges[order], magnitude_db[order]
 
 
 # This function plots a TX or RX complex chirp in an Voltage vs. Time (ms) graph
@@ -385,7 +222,7 @@ def plotChirpVsTime (signal, title, sample_rate, axs=None):
 # signal      - an array of samples to plot (complex)
 # title       - the title of the signal (eg. TX chirp)
 def plotChirpVsSample (signal, title):
-    "Plot a transmitted or received signal versus sample."        
+    "Plot a transmitted or received signal versus sample."
     fig, axs = plt.subplots(2)
     fig.suptitle(title)
     axs[0].set(xlabel='Sample', ylabel='Real Voltage')
@@ -394,15 +231,15 @@ def plotChirpVsSample (signal, title):
     axs[1].plot(np.imag(signal))
     return
 
-# This function returns the sample number of the direct path peak 
-# in a match-filtered rx signal. 
+# This function returns the sample number of the direct path peak
+# in a match-filtered rx signal.
 # -----
 # correl_sig   - the match-filtered signal to examine (complex)
 # direct_start - start search for direct path peak at this sample (sample)
 # describe     - whether to include a text description as code executes
 def findDirectPath (correl_sig, direct_start, describe=True):
     "Find the direct path peak of a cross-correlated signal."
-    
+
     if (describe): print("--- Searching for direct path peak ---")
     if (describe): print("\tStarting search for direct path peak at sample %d." % direct_start)
     relevant_dir = correl_sig[direct_start:]
@@ -411,7 +248,7 @@ def findDirectPath (correl_sig, direct_start, describe=True):
     return dir_peak
 
 # This function returns strongest echo peak in a match-filtered rx signal
-# and the estimated distance to the reflector. Searching is conducted by 
+# and the estimated distance to the reflector. Searching is conducted by
 # specifying the number of samples past the direct path peak to begin search.
 # -----
 # correl_sig  - the match-filtered signal to examine
@@ -424,13 +261,13 @@ def findEcho (correl_sig, sample_rate, dir_peak, echo_start, sig_speed, describe
     "Find strongest echo in a correlated signal starting 'echo_start' samples past the direct path peak."
     if (describe): print("--- Searching for echo peak based on sample ---")
     if (describe): print("\tStarting search for echo peak at sample %d." % (dir_peak + echo_start))
-    relevant_ech_s = correl_sig[(dir_peak + echo_start):]         
+    relevant_ech_s = correl_sig[(dir_peak + echo_start):]
     echo_peak = np.argmax(relevant_ech_s) + dir_peak + echo_start
     if (describe): print("\tThe strongest echo peak was found at sample %d with value %f." % (echo_peak, correl_sig[echo_peak]))
-    
+
     # Now calculate echo distance (assuming direct path occurs at time 0)
     echo_dist = ((echo_peak - dir_peak) / sample_rate) * sig_speed
-    if (describe): print("\tThe signal echoed off a surface %f meters away. \n" % (echo_dist / 2))   
+    if (describe): print("\tThe signal echoed off a surface %f meters away. \n" % (echo_dist / 2))
     return [echo_peak, echo_dist]
 
 
@@ -445,13 +282,13 @@ def getSNR (ideal, actual):
         print("Cannot go forward: Ideal and Actual signals are not the same length.")
         print("Ideal: %d samples. Actual: %d samples." % (np.shape(ideal)[0], np.shape(actual)[0]))
         return
-    
+
     # Find noise SNR and signal SNR
     noise = np.subtract(actual, ideal)
     n_samps = np.shape(ideal)[0]
     avg_noise_pwr = np.real(np.sum(np.multiply(noise, np.conj(noise)))) / n_samps
     avg_signal_pwr = np.real(np.sum(np.multiply(ideal, np.conj(ideal)))) / n_samps
-    
+
     snr = avg_signal_pwr / avg_noise_pwr
     return snr
 
@@ -460,10 +297,10 @@ def extractErrorsFromLog(log_file, raise_exception=False):
 
     if os.path.exists(log_file):
         errors = {}
-        
+
         log_f = open(log_file, 'r')
         log = log_f.readlines()
-        
+
         for idx, line in enumerate(log):
             if "Receiver error:" in line:
                 error_code = re.search("(?:Receiver error: )([\w_]+)", line).groups()[0]

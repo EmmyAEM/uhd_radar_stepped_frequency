@@ -32,6 +32,13 @@ def generate_chirp(config):
     chirp_length = gen_params["chirp_length"]
     pulse_length = gen_params.get("pulse_length", chirp_length) # default to chirp_length is no pulse_length is specified
 
+    if chirp_bandwidth > sample_rate:
+        raise ValueError(
+            f"chirp_bandwidth ({chirp_bandwidth/1e6:.2f} MHz) exceeds sample_rate "
+            f"({sample_rate/1e6:.2f} MHz). Each subchirp must respect its own Nyquist "
+            f"limit independent of any total synthetic bandwidth being spanned."
+        )
+
     # Build chirp
 
     end_freq = chirp_bandwidth / 2 # Chirp goes from -BW/2 to BW/2
@@ -108,6 +115,13 @@ def generate_from_yaml_filename(yaml_filename):
         print("Error occured when generating chirp.")
         sys.exit(1)
 
+    rf_freq = config.get('RF0', {}).get('freq')
+    if rf_freq is not None:
+        chirp_bandwidth = config['GENERATE']['chirp_bandwidth']
+        offset = config['GENERATE'].get('lo_offset_sw', 0)
+        abs_start = rf_freq - chirp_bandwidth / 2 + offset
+        abs_end = rf_freq + chirp_bandwidth / 2 + offset
+        print(f"--- Subchirp will occupy {abs_start/1e6:.2f} MHz to {abs_end/1e6:.2f} MHz (absolute RF) ---")
 
     if show_plot:
 

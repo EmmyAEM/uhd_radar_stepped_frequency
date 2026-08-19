@@ -1,0 +1,122 @@
+
+"""
+This Python script is a software model on how the SDR transmits a chirp and recives it in order to understand how the SDR works.
+To run this program you will need to activate the .venv in the SDR_model directory and install the requirements.txt file.
+"$ source .venv/bin/activate" to activate the virtual environment
+"$ python SDR_model.py" to run the program
+
+Theory: 
+The local ocillator frequency changes between each chirp, in order to mimic the ApRES the SDR would have to send out 8 chirps, to compete with the 1
+chirp of the ApRES. The SDR would have to send out 8 chirps, each with a different local oscillator frequency, in order to cover the same frequency 
+range as the ApRES. the lo_freq variable is an list of the different frequenies the ocilator needs to be sent at in order for this to work. 
+With this in mind I am trying to plot the different chirps and their frequencies over time, to see how the SDR would transmit the chirps. There needs to
+be a time delay between each subchirp in order for the LO to recaliabrate the frequency it is sending at. 
+"""
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.signal import find_peaks # not yet used
+from numpy import random #not yet used
+
+#SDR 205mini constraints
+sample_rate = 56e6 #[Hz] Sample rate of the SDR
+chirp_bandwidth = 25e6 #[Hz] Bandwidth of the chirp
+ep = 3.15 #dielectric constant of the target 
+c = 3e8 #[m/s] Speed of light
+tot_span = 1.0
+
+#mimicking the ApRES
+n_steps = 8 #[steps] Number of steps in the chirp in order to get to 200Mhz
+starting_freq = 200e6 #[Hz] Starting frequency of the chirp ##should be the starting frequency of the ApRES
+lo_freqs = starting_freq + chirp_bandwidth * np.arange(n_steps)  # 200, 225, ..., 375 MHz
+lo_delay = 1e-6 #[s] Time delay between the LO frequency changes to allow the LO to recalibrate ##need to check on this!!!!
+chirp_length = tot_span / n_steps - lo_delay #length of each chirp in seconds
+pts_per_chirp = 200
+t_sub = np.linspace(0, chirp_length, pts_per_chirp) #time vector for one chirp
+baseband_chirp = (t_sub / chirp_length) * chirp_bandwidth
+rf_chirps = [lo + baseband_chirp for lo in lo_freqs]
+segments_t, segments_f = [], []
+t_cursor = 0.0
+for lo in lo_freqs:
+    segments_t.append(t_cursor + t_sub)
+    segments_f.append(lo + baseband_chirp)
+    t_cursor += chirp_length
+    # NaN gap: breaks the plotted line during LO recalibration
+    segments_t.append(np.array([t_cursor, t_cursor + lo_delay]))
+    segments_f.append(np.array([np.nan, np.nan]))
+    t_cursor += lo_delay
+
+t_transmit = np.concatenate(segments_t)
+padded_tx  = np.concatenate(segments_f)
+N_real = int(sample_rate * tot_span)
+print(f"per-subchirp: {chirp_length*1e3:.2f} ms   total: {t_cursor:.4f} s")
+print(f"real IQ length at {sample_rate/1e6:.0f} MSPS: {N_real:,} samples "
+      f"(~{N_real*8/1e6:.0f} MB complex64)")
+
+#plotting transmitted fq v t
+fig, ax = plt.subplots()
+ax.plot(t_transmit * 1000, padded_tx, '-', label='transmitted signal', linewidth=1) #1e6 is used to convert the frequency to MHz for plotting
+ax.set_xlabel('time, $t$ [ms]')
+ax.set_ylabel('frequency, $f$ [MHz]')
+ax.set_title('Frequency of transmitted signal during one chirp')
+
+
+#plotting the transmitted but with a time shift to account for take out the time delay of the LO recalibration
+segments_ts, segments_fs = [], []
+ts_cursor = 0.0
+for lo in lo_freqs:
+    segments_ts.append(ts_cursor + t_sub)
+    segments_fs.append(lo + baseband_chirp)
+    ts_cursor += chirp_length
+    # NaN gap: breaks the plotted line during LO recalibration
+    segments_ts.append(np.array([ts_cursor, ts_cursor]))
+    segments_fs.append(np.array([np.nan, np.nan]))
+
+ts_transmit = np.concatenate(segments_ts)
+padded_txs = np.concatenate(segments_fs)
+ax.plot(ts_transmit * 1000, padded_txs, '-', label='transmitted signal (processed)', linewidth=1) #1e6 is used to convert the frequency to MHz for plotting
+#plt.show()
+
+# plotting recievd fq v t 
+reflector_loc = 200 #location of the reflector in meters (For now just one reflector, but can be expanded to multiple reflectors)
+delay_rx = 2 * reflector_loc * np.sqrt(ep) / c #time delay for the signal to travel to the reflector and back
+rx = starting_freq + (t_transmit - delay_rx) / (chirp_length) * (starting_freq + chirp_bandwidth - starting_freq) #received signal with time delay
+ax.plot(t_transmit * 1000, rx, '-', label='received signal', linewidth=1) #1e6 is used to convert the frequency to MHz for plotting
+ax.legend()
+plt.show()
+
+fbeat = padded_tx - rx
+s = chirp_bandwidth/chirp_length
+range = c * fbeat / (2 * s)
+print(f"beat frequency_tx: {fbeat[0]:.2f} Hz, range: {range[0]:.2f} m")
+fbeats = padded_txs - rx
+range = c *fbeats / (2*s)
+print(f"beat frequency_txs: {fbeats[0]:.2f} Hz, range: {range[0]:.2f} m")
+
+
+
+
+
+#Plotting the recevived complex to do processing on it
+#f_c = starting_freq + c / 2 #center frequency of the chirp
+#k = chirp_bandwidth / chirp_length #chirp ratec
+#c_i = c/np.sqrt(ep) #speed of light in the medium
+#tau = 2 *(reflector_loc)/c_i
+#t_ref = np.arange(0, len(t_transmit), sample_rate) #time vector for one chirp need to fix!
+#tx_signal = np.array([np.cos(2 * np.pi * (f_c * tau + k * tau * (t_transmit - t_ref / 2) - k * tau **2 /2)) for _ in rf_chirps]) # need to double tech the t - t_transmit
+
+
+#fig, ax = plt.subplots()
+#ax.plot(t_transmit * 1000, tx_signal[1], '-', label='transmitted signal', linewidth=1) #1e6 is used to convert the frequency to MHz for plotting
+#ax.set_xlabel('time, $t$ [ms]')
+#ax.set_ylabel('amplitude, $A$ [V]')
+#ax.set_title('transmitted signal during one chirp')
+#ax.legend()
+#plt.show()
+
+#checking if the chirp frequencies are correct
+"""
+for chirp in rf_chirps:
+    print(f"Chirp starting frequency: {chirp[0]/1e6} MHz, ending frequency: {chirp[-1]/1e6} MHz")
+
+"""
+

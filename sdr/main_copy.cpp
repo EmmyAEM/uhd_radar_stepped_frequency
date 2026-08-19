@@ -33,7 +33,7 @@ std::mutex cout_mutex;
 
 /**
  * @brief Checks for errors in the RX buffer and adds the errors to a counter, before using transform() on the incoming pulse
- * 
+ *
  * checks for assorted unknown errors related to RX, checks for unexpected number of samples in the RX buffer, and then uses the transform() function if no errors are found
  * @param n_samps_in_rx_buff Number of samples in the RX buffer
  * @param rx_md Metadata from the RX stream
@@ -52,7 +52,7 @@ void handleRxBuffer(size_t n_samps_in_rx_buff, rx_metadata_t& rx_md, Chirp& chir
     cout_mutex.lock();
     cout << "[ERROR] (Chirp " << pulses_received << ") Receiver error: " << rx_md.strerror() << "\n";
     cout_mutex.unlock();
-    
+
     pulses_received++;
     error_count++;
   } else if (n_samps_in_rx_buff != num_rx_samps) {
@@ -87,7 +87,7 @@ void handleRxBuffer(size_t n_samps_in_rx_buff, rx_metadata_t& rx_md, Chirp& chir
 
 /**
  * @brief Writes received RX data to file if enough pulses have been received
- * 
+ *
  * Checks if the number of pulses received is enough to write a full sample_sum to the file, only if enough error-free pulses have been received.
  * @param pulses_received Total number of pulses received
  * @param error_count Total number of errors encountered
@@ -104,17 +104,6 @@ bool checkForFullSampleSum(Chirp& chirp, vector<complex<float>>& sample_sum, ofs
     if (outfile.is_open()) {
       outfile.write((const char*)&sample_sum.front(),
         num_rx_samps * sizeof(complex<float>));
-      if (outfile.fail()) {
-        // ofstream::write() doesn't throw on failure by default (e.g. disk
-        // full) -- it just silently sets the stream's fail bit and every
-        // subsequent write becomes a no-op, so the program would otherwise
-        // keep running to a normal-looking completion while quietly
-        // producing a truncated/corrupt file. Fail loudly instead.
-        cout_mutex.lock();
-        cout << "[ERROR] Write to outfile failed (disk full?). Aborting." << endl;
-        cout_mutex.unlock();
-        return false; // Error writing to file
-      }
     } else {
       cout_mutex.lock();
       cout << "Cannot write to outfile!" << endl;
@@ -131,7 +120,7 @@ bool checkForFullSampleSum(Chirp& chirp, vector<complex<float>>& sample_sum, ofs
 
 /**
  * @brief Determines if the amount of pulses received is enough to add another file for storage
- * 
+ *
  * Creates more files if the number of pulses is higher than the maximum number of chirps per file, but only if file splitting is enabled.
  * @param chirp Chirp object containing parameters for the chirp
  * @param outfile Output file stream to write the RX data
@@ -164,6 +153,7 @@ void splitOutputFiles(Chirp& chirp, ofstream& outfile, string& current_filename,
  * @brief Finalizes the main function once the main while loop is done
  *
  * Various tasks are finished and significant information is printed to the console, such as the number of errors encountered, total pulses written, and total pulses attempted.
+ * @param gps_stream GPS stream descriptor for closing the GPS file
  * @param outfile Output file stream to close
  * @param current_filename Current filename for the output file
  * @param error_count Total number of errors encountered during the RX process
@@ -171,15 +161,17 @@ void splitOutputFiles(Chirp& chirp, ofstream& outfile, string& current_filename,
  * @param pulses_received Total number of pulses received during the RX process
  * @param transmit_thread Thread group for the transmit worker
  */
-void wrapUp(ofstream& outfile, string& current_filename, boost::thread_group& transmit_thread) {
+void wrapUp(boost::asio::posix::stream_descriptor& gps_stream, ofstream& outfile, string& current_filename, boost::thread_group& transmit_thread) {
   cout << "[RX] Closing output file." << endl;
   outfile.close();
   cout << "[CLOSE FILE] " << current_filename << endl;
 
+  gps_stream.close();
+
   cout << "[RX] Error count: " << error_count << endl;
   cout << "[RX] Total pulses written: " << last_pulse_num_written << endl;
   cout << "[RX] Total pulses attempted: " << pulses_received << endl;
-  
+
   cout << "[RX] Done. Calling join_all() on transmit thread group." << endl;
 
   transmit_thread.join_all();
@@ -190,7 +182,7 @@ void wrapUp(ofstream& outfile, string& current_filename, boost::thread_group& tr
 // Send raw UBX message over Boost Asio serial port
 /**
  * @brief Sends message to GPS module over serial port
- * 
+ *
  * Sends a UBX message to the GPS module over the specified serial port.
  * @param serial Serial port to send UBX commands to configure GPS
  * @param msg Message to send
@@ -198,12 +190,12 @@ void wrapUp(ofstream& outfile, string& current_filename, boost::thread_group& tr
 void sendUBX(boost::asio::serial_port& serial, const std::vector<uint8_t>& msg) {
     write(serial, boost::asio::buffer(msg.data(), msg.size()));
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-} 
+}
 
 // Configure GPS rate to X Hz (UBX-CFG-RATE)
 /**
  * @brief Changes how often the GPS module sends data
- * 
+ *
  * Configures the measurement rate for the GPS module, using hz
  * @param serial Serial port to send UBX commands to configure GPS
  * @param hz Desired measurement rate in Hz
@@ -232,7 +224,7 @@ void configureRate(boost::asio::serial_port& serial, int hz) {
 
 /**
  * @brief Configures what messages are sent by the GPS module
- * 
+ *
  * Determines which messages are sent by the GPS module on startup, such as only sending the GGA message format.
  * @param serial Serial port to send UBX commands to configure GPS
  * @param ggaRate Rate for GGA messages
@@ -269,23 +261,6 @@ void configureNMEAMessages(boost::asio::serial_port& serial, uint8_t ggaRate) {
 
         sendUBX(serial, msg);
     }
-}
-
-/**
- * @brief Inserts a "_step<i>_<freq>MHz" suffix before a file path's extension.
- *
- * e.g. addStepSuffix("../../data/rx_samps.bin", 0, 45e6) ->
- *      "../../data/rx_samps_step0_45MHz.bin"
- */
-string addStepSuffix(const string& path, int step_idx, double freq_hz) {
-  string suffix = "_step" + to_string(step_idx) + "_"
-      + to_string((long) std::round(freq_hz / 1e6)) + "MHz";
-  size_t dot = path.find_last_of('.');
-  size_t slash = path.find_last_of('/');
-  if (dot != string::npos && (slash == string::npos || dot > slash)) {
-    return path.substr(0, dot) + suffix + path.substr(dot);
-  }
-  return path + suffix;
 }
 
 /*
@@ -332,7 +307,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
   /** Thread, interrupt setup **/
 
   set_thread_priority_safe(1.0, true);
-  
+
   signal(SIGINT, &sig_int_handler);
 
   /*** VERSION INFO ***/
@@ -346,17 +321,18 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
   cout << "Note: Pre-summing is supported. If used, each sample written will have num_presums error-free samples averaged in." << endl;
   cout << "Note: Nothing is written to the file for error pulses." << endl;
   cout << "Note: A full num_pulses of error-free chirp data will be collected. ";
-  cout << "(Total number of TX chirps will be num_pulses + # errors)" << endl; 
-  
+  cout << "(Total number of TX chirps will be num_pulses + # errors)" << endl;
+
   cout << "INFO: Number of TX samples: " << num_tx_samps << endl;  //needs to be after chirp and sdr object are both made
   cout << "INFO: Number of RX samples: " << num_rx_samps << endl << endl;  //needs to be after chirp and sdr object are both made
 
- 
-  // Snapshot the configured time_offset before any per-step mutation --
-  // setTimeOffset() is called fresh for every step below (it accumulates
-  // onto whatever's already stored), so reusing the mutated value across
-  // steps would compound incorrectly.
-  double base_time_offset = chirp.getTimeOffset();
+
+  // update the offset time for start of streaming to be offset from the current usrp time
+  chirp.setTimeOffset(chirp.getTimeOffset() + time_spec_t(sdr.getUsrp()->get_time_now()).get_real_secs());  //needs to be after chirp and sdr object are both made
+
+  /*** SPAWN THE TX THREAD ***/
+  boost::thread_group transmit_thread;
+  transmit_thread.create_thread(boost::bind(&transmit_worker, sdr.getTxStream(), sdr.getRxStream(), boost::ref(chirp), boost::ref(sdr)));
 
   if (!sdr.getTransmit()) {
     cout << "WARNING: Transmit disabled by configuration file!" << endl;
@@ -364,24 +340,7 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
 
   //////////////////////////////////////////////////////////////////////////////////////////
 
-  // Compute the stepped-frequency acquisition plan. RF0.freq is the LOW EDGE
-  // of the span (not its center); GENERATE.total_bandwidth defaults to
-  // GENERATE.chirp_bandwidth (a single step / no-op) if absent -- same
-  // formula as run.py's generate_stepped_configs(), so a non-stepped config
-  // behaves exactly as before (one iteration, at RF0.freq).
-  YAML::Node generate_node = config["GENERATE"];
-  double chirp_bandwidth = generate_node["chirp_bandwidth"].as<double>();
-  double total_bandwidth = generate_node["total_bandwidth"].as<double>(chirp_bandwidth);
-  double low_edge_freq = sdr.getRf0()["freq"].as<double>();
-  int num_steps = (int) std::round(total_bandwidth / chirp_bandwidth);
-  if (num_steps < 1) num_steps = 1;
-
-  vector<double> step_freqs;
-  for (int i = 0; i < num_steps; i++) {
-    step_freqs.push_back(low_edge_freq + chirp_bandwidth * (i + 0.5));
-  }
-
-  /*** FILE WRITE SETUP (shared across all steps) ***/
+  /*** FILE WRITE SETUP ***/
   boost::asio::io_service ioservice;
 
   if (save_loc[0] != '/') {
@@ -390,7 +349,6 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
   if (gps_save_loc[0] != '/') {
     gps_save_loc = "../../" + gps_save_loc;
   }
-  string base_save_loc = save_loc; // unsuffixed path -- each step derives its own filename from this
 
   int gps_file = open(gps_save_loc.c_str(), O_CREAT | O_WRONLY | O_TRUNC, S_IRWXU);
   if (gps_file == -1) {
@@ -406,6 +364,26 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
 
   ioservice.run();
 
+
+
+  // open file for writing rx samples
+  ofstream outfile;
+  int save_file_index = 0;
+  string current_filename = save_loc;
+  if (chirp.getMaxChirpsPerFile() > 0) {
+    // Breaking into multiple files is enabled
+    current_filename = current_filename + "." + to_string(save_file_index);
+  }
+
+  // Note: This print statement is used by automated post-processing code. Please be careful about changing the format.
+  cout << "[OPEN FILE] " << current_filename << endl;
+  outfile.open(current_filename, ofstream::binary);
+
+  /*** RX LOOP AND SUM ***/
+  if (chirp.getNumPulses() < 0) {
+    cout << "num_pulses is < 0. Will continue to send chirps until stopped with Ctrl-C." << endl;
+  }
+
   string gps_data;
 
   if (sdr.getCpuFormat() != "fc32") {
@@ -419,8 +397,19 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
 
   // receive buffer
   size_t bytes_per_sample = convert::get_bytes_per_item(sdr.getCpuFormat());
+  vector<complex<float>> sample_sum(num_rx_samps, 0); // Sum error-free RX pulses into this vector
 
-  //Creating GPS log & vars (shared across all steps -- same physical serial device throughout)
+  vector<complex<float>> buff(num_rx_samps); // Buffer sized for one pulse at a time
+  vector<void *> buffs;
+  for (size_t ch = 0; ch < sdr.getRxStream()->get_num_channels(); ch++) {
+    buffs.push_back(&buff.front()); // TODO: I don't think this actually works for num_channels > 1
+  }
+  size_t n_samps_in_rx_buff;
+  rx_metadata_t rx_md; // Captures metadata from rx_stream->recv() -- specifically primarily timeouts and other errors
+
+  float inversion_phase; // Store phase to use for phase inversion of this chirp
+
+  //Creating GPS log & vars
   using namespace boost::asio;
 
   io_service io;
@@ -455,200 +444,100 @@ int UHD_SAFE_MAIN(int argc, char *argv[]) {
   std::string line;
   char c;
 
-  if (chirp.getNumPulses() < 0) {
-    cout << "num_pulses is < 0. Will continue to send chirps until stopped with Ctrl-C." << endl;
-  }
+  // Note: This print statement is used by automated post-processing code. Please be careful about changing the format.
+  cout << "[START] Beginning main loop" << endl;
 
-  /*** STEPPED ACQUISITION LOOP -- one iteration per RF sub-band ***/
-  for (int step_idx = 0; step_idx < num_steps; step_idx++) {
-    double step_freq = step_freqs[step_idx];
+  while ((chirp.getNumPulses() < 0) || (last_pulse_num_written < chirp.getNumPulses())) {
 
-    // Reset per-step counters
-    pulses_scheduled = 0;
-    pulses_received = 0;
-    error_count = 0;
-    last_pulse_num_written = -1;
+    n_samps_in_rx_buff = sdr.getRxStream()->recv(buffs, num_rx_samps, rx_md, 60.0, false); // TODO: Think about timeout
 
-    // Retune (every step, including the first, for simplicity -- setupUsrp()
-    // already tuned once to the base freq, so this is one harmless extra
-    // ~150ms retune on step 0).
-    sdr.retuneFreq(step_freq);
+    // Check for errors in the RX buffer
+    handleRxBuffer(n_samps_in_rx_buff, rx_md, chirp, buff, sample_sum, inversion_phase);
+    // Check if we have a full sample_sum ready to write to file
+    if (!checkForFullSampleSum(chirp, sample_sum, outfile)) {exit(1);};
 
-    // update the offset time for start of streaming to be offset from the current usrp time
-    chirp.setTimeOffset(base_time_offset + time_spec_t(sdr.getUsrp()->get_time_now()).get_real_secs());
 
-    // Note: This print statement is used by automated post-processing code. Please be careful about changing the format.
-    cout << "[STEP BEGIN] index=" << step_idx << " freq=" << std::fixed << step_freq << endl;
+    // Our GPS method (below commented GPS from old version)
+    if (((pulses_received % 2000) == 0) && (sdr.getClkRef() == "gpsdo")) {
+      read(serial, buffer(&c, 1));
+      if (c == '\n') {
+          if (line.find("$GNGGA") == 0) {
+              auto now = std::chrono::system_clock::now();
+              auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                now.time_since_epoch()).count();
 
-    /*** SPAWN THE TX THREAD ***/
-    boost::thread_group transmit_thread;
-    transmit_thread.create_thread(boost::bind(&transmit_worker, sdr.getTxStream(), sdr.getRxStream(), boost::ref(chirp), boost::ref(sdr)));
+              std::stringstream ss(line);
+              std::string field;
+              std::vector<std::string> fields;
 
-    // open file for writing rx samples
-    save_loc = (num_steps > 1) ? addStepSuffix(base_save_loc, step_idx, step_freq) : base_save_loc;
-    ofstream outfile;
-    int save_file_index = 0;
-    string current_filename = save_loc;
-    if (chirp.getMaxChirpsPerFile() > 0) {
-      // Breaking into multiple files is enabled
-      current_filename = current_filename + "." + to_string(save_file_index);
+              while (std::getline(ss, field, ',')) {
+                  fields.push_back(field);
+              }
+
+              if (fields.size() >= 10) {
+                  auto convertToDecimal = [](const std::string& nmeaCoord, const std::string& dir) {
+                      if (nmeaCoord.empty()) return 0.0;
+                      double raw = std::stod(nmeaCoord);
+                      int degrees = static_cast<int>(raw / 100);
+                      double minutes = raw - (degrees * 100);
+                      double decimal = degrees + minutes / 60.0;
+                      if (dir == "S" || dir == "W") decimal = -decimal;
+                      return decimal;
+                  };
+
+                  double latitude = convertToDecimal(fields[2], fields[3]);
+                  double longitude = convertToDecimal(fields[4], fields[5]);
+                  double altitude = std::stod(fields[9]);
+
+                  if (gps_output.is_open()) {
+                      gps_output << std::fixed << std::setprecision(9)
+                              << now_us << "," << latitude << "," << longitude << "," << altitude << std::endl;
+                  }
+
+                  // FOR READABILITY ONLY!!! Remove for actual use
+                  std::cout << std::fixed << std::setprecision(9)
+                          << "t=" << now_us << " s, "
+                          << "Lat: " << latitude << ", Lon: " << longitude
+                          << ", Alt: " << altitude << " m\n";
+              }
+
+              line.clear();
+
+          }
+          line.clear();
+      } else if (c != '\r') {
+          line += c;
+      }
     }
 
-    // Note: This print statement is used by automated post-processing code. Please be careful about changing the format.
-    cout << "[OPEN FILE] " << current_filename << endl;
-    outfile.open(current_filename, ofstream::binary);
+    // get gps data
+    /*if (sdr.getClkRef() == "gpsdo" && ((pulses_received % 100000) == 0)) {
+      gps_data = sdr.getUsrp()->get_mboard_sensor("gps_gprmc").to_pp_string();
+      //cout << gps_data << endl;
+    }*/
 
-    /*** RX LOOP AND SUM ***/
-    vector<complex<float>> sample_sum(num_rx_samps, 0); // Sum error-free RX pulses into this vector
-
-    vector<complex<float>> buff(num_rx_samps); // Buffer sized for one pulse at a time
-    vector<void *> buffs;
-    for (size_t ch = 0; ch < sdr.getRxStream()->get_num_channels(); ch++) {
-      buffs.push_back(&buff.front()); // TODO: I don't think this actually works for num_channels > 1
-    }
-    size_t n_samps_in_rx_buff;
-    rx_metadata_t rx_md; // Captures metadata from rx_stream->recv() -- specifically primarily timeouts and other errors
-
-    float inversion_phase; // Store phase to use for phase inversion of this chirp
-
-    // Note: This print statement is used by automated post-processing code. Please be careful about changing the format.
-    cout << "[START] Beginning main loop" << endl;
-
-    while ((chirp.getNumPulses() < 0) || (last_pulse_num_written < chirp.getNumPulses())) {
-
-      // Accumulate one full pulse's worth of samples via repeated recv()
-      // calls. A single recv() call for a very large capture (e.g. a long
-      // ApRES-style chirp -- potentially millions of samples) doesn't
-      // reliably complete on this hardware/transport even with
-      // one_packet=false, silently blocking well past its own timeout.
-      // Looping bounded chunks like this is the standard UHD pattern for
-      // large captures (see e.g. UHD's own rx_samples_to_file.cpp example).
-      // Chunk size is a tradeoff: too small (e.g. the streamer's own
-      // get_max_num_samps(), a few thousand) means so many separate recv()
-      // calls that their per-call overhead can't keep up with a continuous
-      // 56Msps+ stream, causing ERROR_CODE_OVERFLOW; too large (e.g. the
-      // full pulse in one call) silently hangs. 200k samples is a middle
-      // ground -- ~56 calls for an 11.2M-sample pulse instead of ~3000.
-      {
-        size_t chunk_size = 200000;
-        size_t total_rx_samps = 0;
-        vector<void *> chunk_buffs(buffs.size());
-        while (total_rx_samps < num_rx_samps) {
-          size_t remaining = num_rx_samps - total_rx_samps;
-          size_t requested = (chunk_size < remaining) ? chunk_size : remaining;
-          for (size_t ch = 0; ch < chunk_buffs.size(); ch++) {
-            chunk_buffs[ch] = &buff[total_rx_samps]; // TODO: per-channel offset, see buffs TODO above
-          }
-          size_t n = sdr.getRxStream()->recv(chunk_buffs, requested, rx_md, 60.0, false); // TODO: Think about timeout
-          total_rx_samps += n;
-          if (rx_md.error_code != rx_metadata_t::ERROR_CODE_NONE) {
-            break; // let handleRxBuffer below report/handle the error
-          }
-          if (n == 0) {
-            break; // no progress -- avoid spinning forever
-          }
-        }
-        n_samps_in_rx_buff = total_rx_samps;
-      }
-
-      // Check for errors in the RX buffer
-      handleRxBuffer(n_samps_in_rx_buff, rx_md, chirp, buff, sample_sum, inversion_phase);
-      // Check if we have a full sample_sum ready to write to file
-      if (!checkForFullSampleSum(chirp, sample_sum, outfile)) {exit(1);};
-
-
-      // Our GPS method (below commented GPS from old version)
-      if (((pulses_received % 2000) == 0) && (sdr.getClkRef() == "gpsdo")) {
-        read(serial, buffer(&c, 1));
-        if (c == '\n') {
-            if (line.find("$GNGGA") == 0) {
-                auto now = std::chrono::system_clock::now();
-                auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                                  now.time_since_epoch()).count();
-
-                std::stringstream ss(line);
-                std::string field;
-                std::vector<std::string> fields;
-
-                while (std::getline(ss, field, ',')) {
-                    fields.push_back(field);
-                }
-
-                if (fields.size() >= 10) {
-                    auto convertToDecimal = [](const std::string& nmeaCoord, const std::string& dir) {
-                        if (nmeaCoord.empty()) return 0.0;
-                        double raw = std::stod(nmeaCoord);
-                        int degrees = static_cast<int>(raw / 100);
-                        double minutes = raw - (degrees * 100);
-                        double decimal = degrees + minutes / 60.0;
-                        if (dir == "S" || dir == "W") decimal = -decimal;
-                        return decimal;
-                    };
-
-                    double latitude = convertToDecimal(fields[2], fields[3]);
-                    double longitude = convertToDecimal(fields[4], fields[5]);
-                    double altitude = std::stod(fields[9]);
-
-                    if (gps_output.is_open()) {
-                        gps_output << std::fixed << std::setprecision(9)
-                                << now_us << "," << latitude << "," << longitude << "," << altitude << std::endl;
-                    }
-
-                    // FOR READABILITY ONLY!!! Remove for actual use
-                    std::cout << std::fixed << std::setprecision(9)
-                            << "t=" << now_us << " s, "
-                            << "Lat: " << latitude << ", Lon: " << longitude
-                            << ", Alt: " << altitude << " m\n";
-                }
-
-                line.clear();
-
-            }
-            line.clear();
-        } else if (c != '\r') {
-            line += c;
-        }
-      }
-
-      // get gps data
-      /*if (sdr.getClkRef() == "gpsdo" && ((pulses_received % 100000) == 0)) {
-        gps_data = sdr.getUsrp()->get_mboard_sensor("gps_gprmc").to_pp_string();
-        //cout << gps_data << endl;
-      }*/
-
-      // check if someone wants to stop
-      if (stop_signal_called) {
-        cout_mutex.lock();
-        cout << "[RX] Reached stop signal handling for outer RX loop -> break" << endl;
-        cout_mutex.unlock();
-        break;
-      }
-
-      // write gps string to file
-      /*if (sdr.getClkRef() == "gpsdo") {
-        boost::asio::async_write(gps_stream, boost::asio::buffer(gps_data + "\n"), gps_asio_handler);
-      }*/
-
-      // split output files based on number of chirps
-      splitOutputFiles(chirp, outfile, current_filename, save_file_index);
-
-      // // clear the matrices holding the sums
-      // fill(sample_sum.begin(), sample_sum.end(), complex<int16_t>(0,0));
-    }
-
-    /*** WRAP UP THIS STEP ***/
-    wrapUp(outfile, current_filename, transmit_thread);
-
-    // Note: This print statement is used by automated post-processing code. Please be careful about changing the format.
-    cout << "[STEP DONE] index=" << step_idx << " freq=" << std::fixed << step_freq
-         << " file=" << current_filename << endl;
-
+    // check if someone wants to stop
     if (stop_signal_called) {
-      break; // Ctrl-C: don't start any further steps
+      cout_mutex.lock();
+      cout << "[RX] Reached stop signal handling for outer RX loop -> break" << endl;
+      cout_mutex.unlock();
+      break;
     }
+
+    // write gps string to file
+    /*if (sdr.getClkRef() == "gpsdo") {
+      boost::asio::async_write(gps_stream, boost::asio::buffer(gps_data + "\n"), gps_asio_handler);
+    }*/
+
+    // split output files based on number of chirps
+    splitOutputFiles(chirp, outfile, current_filename, save_file_index);
+
+    // // clear the matrices holding the sums
+    // fill(sample_sum.begin(), sample_sum.end(), complex<int16_t>(0,0));
   }
 
-  gps_stream.close();
+  /*** WRAP UP ***/
+  wrapUp(gps_stream, outfile, current_filename, transmit_thread);
 
   return EXIT_SUCCESS;
 
@@ -720,7 +609,7 @@ void transmit_worker(tx_streamer::sptr& tx_stream, rx_streamer::sptr& rx_stream,
     The idea here is scheduler a handful of chirps ahead to let
     the transport layer (i.e. libUSB or whatever it is for ethernet)
     buffering actually do its job.
-    
+
     In practice, letting this schedule 10s of pulses ahead seems to
     perform well. According to the documentation, however, the maximum
     queue depth is 8 for both the B20x-mini and X310. (And each pulse
@@ -747,43 +636,13 @@ void transmit_worker(tx_streamer::sptr& tx_stream, rx_streamer::sptr& rx_stream,
     rx_time = chirp.getTimeOffset() + (chirp.getPulseRepInt() * pulses_scheduled); // TODO: How do we track timing
     tx_md.time_spec = time_spec_t(rx_time - chirp.getTxLead());
 
-    // RX -- issued before the TX send() below (not after) because send() is a
-    // blocking call whose host-side USB transfer time scales with num_tx_samps.
-    // For short pulses that was negligible, but for long ApRES-style chirps
-    // (hundreds of thousands+ of samples) it can take real, non-negligible
-    // time -- issuing this afterward let the precomputed rx_time go stale
-    // relative to actual device time by the time issue_stream_cmd() ran,
-    // causing RX to silently never start. Both TX and RX are scheduled via
-    // their own time_spec regardless of issue order, so reordering doesn't
-    // change when either physically starts.
+    if (sdr.getTransmit()) {
+      n_samp_tx = tx_stream->send(&tx_buff.front(), num_tx_samps, tx_md, 60); // TODO: Think about timeout
+    }
+
+    // RX
     stream_cmd.time_spec = time_spec_t(rx_time);
     rx_stream->issue_stream_cmd(stream_cmd);
-
-    if (sdr.getTransmit()) {
-      // Send in bounded chunks rather than one send() call for the whole
-      // pulse -- mirrors the RX chunking above (see comment there). A
-      // single send() for a large burst (e.g. hundreds of thousands+
-      // samples) doesn't reliably keep the device fed continuously on this
-      // hardware/transport, causing TX underflow (and, since send() can
-      // stall well past when it should return, the *next* pulse's
-      // precomputed absolute time_spec can go stale before it's even
-      // issued, causing late-command errors too).
-      size_t tx_chunk_size = 200000;
-      size_t total_tx_samps = 0;
-      tx_md.start_of_burst = true;
-      tx_md.has_time_spec = true; // Only the first chunk of the burst carries the time_spec
-      while (total_tx_samps < num_tx_samps) {
-        size_t remaining = num_tx_samps - total_tx_samps;
-        size_t requested = (tx_chunk_size < remaining) ? tx_chunk_size : remaining;
-        tx_md.end_of_burst = (requested == remaining);
-        n_samp_tx = tx_stream->send(&tx_buff[total_tx_samps], requested, tx_md, 60); // TODO: Think about timeout
-        total_tx_samps += n_samp_tx;
-        tx_md.start_of_burst = false;
-        tx_md.has_time_spec = false;
-        if (n_samp_tx == 0) break; // no progress -- avoid spinning forever
-      }
-      n_samp_tx = total_tx_samps;
-    }
 
     //cout << "[TX] Scheduled pulse " << pulses_scheduled << " at " << rx_time << " (n_samp_tx = " << n_samp_tx << ")" << endl;
 
